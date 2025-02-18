@@ -64,11 +64,8 @@ type Sequence struct {
 	// number of tokens to predict
 	numPredict int
 
-	// set of transforms to run on generated logits
-	transforms []sample.Transform
-
-	// sampler to use for sampling
-	useGreedy bool
+	// sampler with transforms to run on generated logits
+	sampler sample.Sampler
 
 	// channel to send back the embedding if embedding only
 	embedding chan []float32
@@ -95,9 +92,8 @@ type NewSequenceParams struct {
 	numPredict int
 	stop       []string
 	numKeep    int32
-	transforms []sample.Transform
+	sampler    sample.Sampler
 	embedding  bool
-	useGreedy  bool
 }
 
 func (s *Server) NewSequence(prompt string, images []ImageData, params NewSequenceParams) (*Sequence, error) {
@@ -139,8 +135,7 @@ func (s *Server) NewSequence(prompt string, images []ImageData, params NewSequen
 		responses:           make(chan string, 100),
 		quit:                make(chan bool, 1),
 		embedding:           make(chan []float32, 1),
-		transforms:          params.transforms,
-		useGreedy:           params.useGreedy,
+		sampler:             params.sampler,
 		embeddingOnly:       params.embedding,
 		stop:                params.stop,
 		numKeep:             params.numKeep,
@@ -433,19 +428,10 @@ func (s *Server) processBatch() error {
 		// sample a token
 		vocabSize := len(logits) / len(options.Outputs)
 
-		var sampler sample.Sampler
-		if seq.useGreedy {
-			sampler = sample.Greedy()
-		} else {
-			sampler = sample.Weighted(nil)
-		}
-
-		sampledToken, err := sampler.Sample(logits[seq.iBatch*vocabSize:(seq.iBatch+1)*vocabSize], seq.transforms...)
+		token, err := seq.sampler.Sample(logits[seq.iBatch*vocabSize : (seq.iBatch+1)*vocabSize])
 		if err != nil {
 			return fmt.Errorf("failed to sample token: %w", err)
 		}
-
-		token := int32(sampledToken)
 
 		// if it's an end of sequence token, break
 		if s.model.(model.TextProcessor).Is(token, model.SpecialEOS) {
@@ -570,7 +556,7 @@ type CompletionResponse struct {
 	Timings Timings `json:"timings"`
 }
 
-func getTransforms(req CompletionRequest) []sample.Transform {
+func newSampler(req CompletionRequest) sample.Sampler {
 	transforms := []sample.Transform{}
 
 	if req.Temperature != 0 {
@@ -587,6 +573,13 @@ func getTransforms(req CompletionRequest) []sample.Transform {
 		transforms = append(transforms, sample.MinP(req.MinP))
 	}
 
+	var sampler sample.Sampler
+	if req.Temperature != 0 {
+		sampler = sample.Greedy(transforms...)
+	} else {
+		sampler = sample.Weighted(nil, transforms...)
+	}
+
 	// TODO(parthsareen): Implement other sampling params
 	// samplingParams.TypicalP = req.TypicalP
 	// samplingParams.RepeatLastN = req.RepeatLastN
@@ -599,7 +592,7 @@ func getTransforms(req CompletionRequest) []sample.Transform {
 	// samplingParams.Seed = uint32(req.Seed)
 	// samplingParams.Grammar = req.Grammar
 
-	return transforms
+	return sampler
 }
 
 func (s *Server) completion(w http.ResponseWriter, r *http.Request) {
@@ -624,8 +617,7 @@ func (s *Server) completion(w http.ResponseWriter, r *http.Request) {
 		numPredict: req.NumPredict,
 		stop:       req.Stop,
 		numKeep:    int32(req.NumKeep),
-		transforms: getTransforms(req),
-		useGreedy:  req.Temperature == 0,
+		sampler:    newSampler(req),
 		embedding:  false,
 	})
 	if err != nil {

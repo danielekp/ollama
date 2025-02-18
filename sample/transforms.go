@@ -7,17 +7,11 @@ import (
 	"slices"
 
 	pq "github.com/emirpasic/gods/v2/queues/priorityqueue"
-	"golang.org/x/exp/rand"
 	"gonum.org/v1/gonum/floats"
-	"gonum.org/v1/gonum/stat/sampleuv"
 )
 
 type Transform interface {
 	Apply([]float64) ([]float64, error)
-}
-
-type Sampler interface {
-	Sample([]float32, ...Transform) (int, error)
 }
 
 // TODO(parthsareen): potentially cache softmax values
@@ -140,51 +134,4 @@ func (p MinP) Apply(logits []float64) ([]float64, error) {
 	}
 
 	return logits, nil
-}
-
-type weighted struct {
-	src rand.Source
-}
-
-func Weighted(seed *int64) Sampler {
-	var src rand.Source
-	if seed != nil {
-		src = rand.NewSource(uint64(*seed))
-	}
-	return weighted{src: src}
-}
-
-func (s weighted) Sample(logits []float32, transforms ...Transform) (int, error) {
-	logits64 := make([]float64, len(logits))
-	for i, v := range logits {
-		logits64[i] = float64(v)
-	}
-
-	var err error
-	for _, t := range transforms {
-		logits64, err = t.Apply(logits64)
-		if err != nil {
-			return -1, err
-		}
-	}
-
-	logitsCopy := make([]float64, 0, len(logits))
-	indices := make([]int, 0, len(logits))
-	for i, logit := range logits64 {
-		if !math.IsInf(logit, -1) {
-			logitsCopy = append(logitsCopy, logit)
-			indices = append(indices, i)
-		}
-	}
-
-	if len(logitsCopy) == 0 {
-		return -1, errors.New("no valid logits found for weighed sampling")
-	}
-
-	probs := softmax(logitsCopy)
-	w := sampleuv.NewWeighted(probs, s.src)
-	if idx, ok := w.Take(); ok {
-		return indices[idx], nil
-	}
-	return -1, errors.New("weighed sampler failed, no valid token found")
 }
